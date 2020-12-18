@@ -52,33 +52,33 @@ below we remove repeated gauges using a distance-matrix based technique.
 
 
 ```r
-    #
-    # Define the gauge indices of interest -- you need to make BOTH "site_gauge_inds" and "site_gauges"
-    #
-    all_gauges = ptha18$get_all_gauges()
-    site_gauge_inds = which(all_gauges$lon > 186 & all_gauges$lon < 188.9 &
-                            all_gauges$lat > -15 & all_gauges$lat < -12)
-    site_gauges = all_gauges[site_gauge_inds,]
-    # In this case we have a double-up of one gauge. This is not unusual in
-    # PTHA18. For the analysis here we don't want that because it will make 1
-    # site count as 2. 
-    # Let's remove it by computing a distance matrix, and removing points that
-    # have '0' IN THE UPPER TRIANGLE of the distance matrix. Restriction to the
-    # upper triangle will mean we don't remove both points
-    site_gauges_distm = distm(cbind(site_gauges$lon, site_gauges$lat)) # Distance matrix
-    # Identify indices in the distance matrix upper triangle with a distance of 0.0. These
-    # should be removed. Notice we could change 0.0 to some other distance if we wanted to
-    # get rid of 'nearby but non-zero distance' points.
-    to_remove = which((upper.tri(site_gauges_distm) & (site_gauges_distm == 0.0)), arr.ind=TRUE)
-    if(length(to_remove) > 0){
-        # There are repeated gauges
-        inds_to_remove = unique(to_remove[,1])
-        site_gauge_inds = site_gauge_inds[-inds_to_remove]
-        site_gauges = site_gauges[-inds_to_remove,]
-    }
+#
+# Define the gauge indices of interest -- you need to make BOTH "site_gauge_inds" and "site_gauges"
+#
+all_gauges = ptha18$get_all_gauges()
+site_gauge_inds = which(all_gauges$lon > 186 & all_gauges$lon < 188.9 &
+                        all_gauges$lat > -15 & all_gauges$lat < -12)
+site_gauges = all_gauges[site_gauge_inds,]
+# In this case we have a double-up of one gauge. This is not unusual in
+# PTHA18. For the analysis here we don't want that because it will make 1
+# site count as 2. 
+# Let's remove it by computing a distance matrix, and removing points that
+# have '0' IN THE UPPER TRIANGLE of the distance matrix. Restriction to the
+# upper triangle will mean we don't remove both points
+site_gauges_distm = distm(cbind(site_gauges$lon, site_gauges$lat)) # Distance matrix
+# Identify indices in the distance matrix upper triangle with a distance of 0.0. These
+# should be removed. Notice we could change 0.0 to some other distance if we wanted to
+# get rid of 'nearby but non-zero distance' points.
+to_remove = which((upper.tri(site_gauges_distm) & (site_gauges_distm == 0.0)), arr.ind=TRUE)
+if(length(to_remove) > 0){
+    # There are repeated gauges
+    inds_to_remove = unique(to_remove[,1])
+    site_gauge_inds = site_gauge_inds[-inds_to_remove]
+    site_gauges = site_gauges[-inds_to_remove,]
+}
 
-    # Now print the gauges (should not be any repetition)
-    site_gauges
+# Now print the gauges (should not be any repetition)
+site_gauges
 ```
 
 ```
@@ -164,27 +164,27 @@ exceedance-rate.
 
 
 ```r
-    #
-    # Set the criteria for picking scenarios. 
-    scenario_match = list()
-    # Desired exceedance_rate
-    scenario_match$exrate = 1/2500
-    # Hazard curve mean or percentile type -- a string identifying the stage-vs-exceedance-rate curve
-    # type. Either 'rate' (mean) or 'rate_84pc' (84th percentile) or 'rate_16pc'
-    # (16th percentile), 'rate_median' (50th percentile), 'rate_lower_ci' (2.5th
-    # percentile), 'rate_upper_ci' (97.5 percentile)
-    scenario_match$hazard_curve_type = 'rate_median' # 'rate_84pc' # 'rate_84pc'
-    # Rigidity type used for hazard calculations -- either an empty string ''
-    # (constant rigidity) or 'variable_mu' (depth varying rigidity). If you use
-    # variable_mu, be sure to use the variable_mu_Mw from the event table
-    scenario_match$mu_type = '' # 'variable_mu'
-    # The 'allowed fractional deviation of the peak-stage from the target value'
-    # that is still regarded as a match, e.g. 0.1 = 10%
-    scenario_match$target_stage_tolerance = 0.1 #
-    # The minimum number of gauges that should satisfy the allowed tolerance, for the
-    # scenario to be stored. At all other gauges, the peak-stage must be
-    # less than or equal the exceedance-rate-derived value
-    scenario_match$number_matching_gauges = 3
+#
+# Set the criteria for picking scenarios. 
+scenario_match = list()
+# Desired exceedance_rate
+scenario_match$exrate = 1/2500
+# Hazard curve mean or percentile type -- a string identifying the stage-vs-exceedance-rate curve
+# type. Either 'rate' (mean) or 'rate_84pc' (84th percentile) or 'rate_16pc'
+# (16th percentile), 'rate_median' (50th percentile), 'rate_lower_ci' (2.5th
+# percentile), 'rate_upper_ci' (97.5 percentile)
+scenario_match$hazard_curve_type = 'rate_median' # 'rate_84pc' # 'rate_84pc'
+# Rigidity type used for hazard calculations -- either an empty string ''
+# (constant rigidity) or 'variable_mu' (depth varying rigidity). If you use
+# variable_mu, be sure to use the variable_mu_Mw from the event table
+scenario_match$mu_type = '' # 'variable_mu'
+# The 'allowed fractional deviation of the peak-stage from the target value'
+# that is still regarded as a match, e.g. 0.1 = 10%
+scenario_match$target_stage_tolerance = 0.1 #
+# The minimum number of gauges that should satisfy the allowed tolerance, for the
+# scenario to be stored. At all other gauges, the peak-stage must be
+# less than or equal the exceedance-rate-derived value
+scenario_match$number_matching_gauges = 3
 ```
 
 ## Step 4: Find the scenarios matching the above criteria
@@ -195,24 +195,25 @@ those used to describe scenarios in our [DETAILED_README.md](../../DETAILED_READ
 
 
 ```r
-    # Find scenarios which match the above criteria at the previously downloaded gauge+"source-zone"
-    kermadectonga_events_2500 = get_matching_scenarios(kermadec_source_data, scenario_match)
-    names(kermadectonga_events_2500)    
+# Find scenarios which match the above criteria at the previously downloaded gauge+"source-zone"
+kermadectonga_events_2500 = get_matching_scenarios(kermadec_source_data, scenario_match)
+names(kermadectonga_events_2500)    
 ```
 
 ```
 ##  [1] "events"                 "unit_source_statistics" "gauge_netcdf_files"    
 ##  [4] "desired_event_rows"     "events_file"            "unit_source_file"      
 ##  [7] "tsunami_events_file"    "peak_stages"            "peak_stages_within_tol"
-## [10] "peak_slip"              "max_stage_at_exrate"
+## [10] "peak_slip"              "slip_from_Mw_function"  "peak_slip_ratio"       
+## [13] "max_stage_at_exrate"
 ```
 
 The function `summarise_scenarios` can be used to plot summary information on
 the scenarios. 
 
 ```r
-    # Plot summary information
-    summarise_scenarios(kermadectonga_events_2500)
+# Plot summary information
+summarise_scenarios(kermadectonga_events_2500)
 ```
 
 ![plot of chunk scenarioCriteria3](figure/scenarioCriteria3-1.png)
@@ -223,27 +224,44 @@ Here we explain the above plot:
 
 * The top-right panel shows the scenario's peak-slip and magnitude. For comparison purposes the blue line shows the *average* slip for a hypothetical uniform-slip earthquake with rigidity of 30 GPA, and length and width following the median scaling relation used in the PTHA18 (from Strasser et al. 2010). The orange and red-lines show the latter values multipled by 3 and 6 respectively. For variable-area-uniform-slip earthquakes, high peak-slip values correspond to compact earthquakes and vice-versa. For heterogeneous-slip earthquakes, high peak-slip values are also often associated with compact earthquakes, but more generally indicate that slip is concentrated on an asperity. In the PTHA18 peak-slip values greater than 7.5 times the blue-line are not permitted; however there is much uncertainty around this threshold. Some users may prefer to choose scenarios with lower slip-maxima, and this plot can help.
 
-* The middle panel shows the distribution of maximum-stage values for each of the selected scenarios using [box-plots](https://en.wikipedia.org/wiki/Box_plot), along with the target maximum-stage values. As expected the target value is never exceeded by much. Also, not all gauges achieve the target value. That's because some gauges are less affected by the Kermadec-Tonga source-zone, as compared with other sources. Scenarios that produced high maximum-stage values at these gauges would likely produce excessively high maximum-stage values at the other gauges, and so are disallowed in the current methodology. We should search other source-zones to find scenarios that are appropriate for those gauges.
+* The second-row-left panel shows the potential energy in the scenario's initial condition, vs the magnitude. The potential energy provides an alternative measure of tsunami size, and can be estimated for historical tsunamis. In this plot we include very rough estimates of the potential energies of some historical events, based on the literature and our own work. We also include a hypothetical example with double the slip of our Chile 1960 estimate (and thus 4x the energy), which in principle should have a tsunami twice as large. *While this is useful for comparison, please note the historical event energies could easily be wrong by a factor of 2 or more. Here are a few papers that estimate tsunami energies and can be consulted for more information:* [Nosov et al., 2014](https://doi.org/10.1007/s00024-013-0730-6), [Titov et al. 2016](http://dx.doi.org/10.1007/s00024-016-1312-1), [Davies et al., 2020](https://www.frontiersin.org/articles/10.3389/feart.2020.598235/abstract).
 
-* The bottom panel shows, for each scenario, which gauges attained maximum-stage values within the target window. This can help with manually selecting some subset of scenarios for further analysis. 
+* The second-row-right panel shows the cumulative sum of the selected scenario rates when sorted by magnitude, normalised to [0-1]. Magnitudes corresponding to a value of 0.5 can be considered as `typical` (i.e. it is equally likely to have a higher or lower magnitude scenario that matches the criteria). Typically lower magnitude events are more likely than higher magnitude events, and this plot tries to emphasise those relative likelihoods.
 
-To help select scenarios of interest, it is also useful to consider which among the above scenarios are more likely. For this purpose we consider the magnitude cumulative distribution function (weighted by the scenario rates). Magnitudes corresponding to a value of 0.5 can be considered as `typical` (i.e. it is equally likely to have a higher or lower magnitude scenario that matches the criteria).  
+* The third-row panel shows the distribution of maximum-stage values for each of the selected scenarios using [box-plots](https://en.wikipedia.org/wiki/Box_plot), along with the target maximum-stage values. As expected the target value is never exceeded by much. Also, not all gauges achieve the target value. That's because some gauges are less affected by the Kermadec-Tonga source-zone, as compared with other sources. Scenarios that produced high maximum-stage values at these gauges would likely produce excessively high maximum-stage values at the other gauges, and so are disallowed in the current methodology. We should search other source-zones to find scenarios that are appropriate for those gauges.
+
+* The bottom panel shows, for each scenario, which gauges attained maximum-stage values within the target window. This can help with manually selecting some subset of scenarios for further analysis. The gauge labels are on the LHS axis, the scenario magnitude is on the RHS axis and is shown on the line.
+
+# Identifying subsets of the above scenarios
+
+Based on the above plot, we might decide to look further at some subset of scenarios. For example, suppose we want to look at the events with magnitude ranging from 8.2-8.8 having peak-slip between 10 and 20m (this is subjective, and other decisions are certainly possible - but it serves as an example). Below we show how to find their event numbers, and make a plot of their peak-slip values to check it worked:
 
 
 ```r
-    par(mfrow=c(1,1)) # Reset plot
-
-    # Compute the Mw cumulative distribution function for the selected
-    # scenarios (weighted by the scenario rates). This gives an idea of
-    # which magnitudes are more-or-less likely, among the identified scenarios.
-    weighted_Mw_distrbution = weighted_cdf(kermadectonga_events_2500$events$Mw, 
-        kermadectonga_events_2500$events$rate_annual)
-    abline(h=0.5, col='red')
-    title(main='Mw distribution for selected scenarios, weighted by annual rate')
+# Find events with Mw >8.15 and Mw < 8.85 -- this will include all events
+# with Mw 8.2-8.8, and the offsets by 0.05 protect us against tiny floating point
+# rounding. Also only take events with peak-slip between 10 and 20 m.
+k = which((kermadectonga_events_2500$events$Mw > 8.15) &
+          (kermadectonga_events_2500$events$Mw < 8.85) &
+          (kermadectonga_events_2500$peak_slip > 10) & 
+          (kermadectonga_events_2500$peak_slip < 20)  
+          )
+# Here are the row-indices of those scenarios 
+row_indices_of_subset = kermadectonga_events_2500$desired_event_rows[k]
+row_indices_of_subset # These could be used to get the initial condition or gauge time-series -- see below
 ```
 
-![plot of chunk scenarioCriteria4](figure/scenarioCriteria4-1.png)
+```
+## [1] 28628 36690 37651 37732 38611 38655 38729
+```
 
+```r
+# Here is a histogram of their peak-slip values
+hist(kermadectonga_events_2500$peak_slip[k], main='Peak-slip values for the event subset',
+     xlab='Peak slip (m)')
+```
+
+![plot of chunk scenarioSubsetting](figure/scenarioSubsetting-1.png)
 
 # Suggestions on usage
 
@@ -264,10 +282,17 @@ kermadectonga_events_2500$desired_event_rows
 ```
 
 ```r
-# For instance if we wanted the earthquake data for 2nd entry, in a format
+# For instance if we wanted the earthquake data the 2nd event, in a format
 # easily compatable with our the PTHA18 DETAILED_README, we could do:
 event_id = kermadectonga_events_2500$desired_event_rows[2]
+event_id # This is the row-index of the second event in the PTHA database
+```
 
+```
+## [1] 36690
+```
+
+```r
 # Get the event data directly from the PTHA database (easier than hacking it
 # out of the above objects).
 event_of_interest = ptha18$get_source_zone_events_data(
@@ -279,3 +304,103 @@ plot(event_raster, main='Initial condition for a selected event of interest')
 ```
 
 ![plot of chunk suggestedUsage](figure/suggestedUsage-1.png)
+
+# Quickly plotting initial conditions and wave time-series for several events
+
+The code below plots the initial condition and wave time-series for all
+selected events, as files in a specified output directory. For other source
+zones one might need to modify it (e.g. different figure dimensions or axes
+limits, etc).
+
+
+```r
+# Name of the output directory for the plots. Here we insert some variables into the name
+plot_outdir = paste0('batch_plots', 
+                     '_SRC_', source_zone, 
+                     '_SLP_', slip_type, 
+                     '_CRV_', scenario_match$hazard_curve_type, 
+                     '_EXRATE_', as.character(scenario_match$exrate), 
+                     '_STGTOL_', as.character(scenario_match$target_stage_tolerance), 
+                     '_NGAUGE_', as.character(scenario_match$number_matching_gauges))
+
+# Use this to control the gauges plot xlimits, ylimits, and label position
+gauge_plot_xlim = c(0, 10*3600) # Plot the first 10 hours
+gauge_plot_vertical_spacing = 1.0 # Plot all gauge time-series on one figure, using this vertical spacing.
+gauge_plot_ylim_extra = c(-1, 1) # Add this to the plot y-range implied by the gauge_plot_vertical_spacing
+gauge_plot_gaugeID_offset = c(0, 0.5) # Offset for the gaugeID text that is added to the plot.
+
+# Make the output directory
+dir.create(plot_outdir, showWarnings=FALSE)
+
+# Get all the events in a format that the ptha_access codes will work with
+events_of_interest = ptha18$get_source_zone_events_data(source_zone, 
+    slip_type=slip_type, 
+    desired_event_rows=kermadectonga_events_2500$desired_event_rows,
+    include_potential_energy=TRUE)
+
+# Get the wave time-series for all events at all 'site_gauges'
+all_tsunamis_at_gauges = ptha18$get_flow_time_series_at_hazard_point(
+    events_of_interest,
+    event_ID = 1:nrow(events_of_interest$events),  # Check all "events_of_interest"
+    target_points = site_gauges)
+
+# Plot everything
+for(i in 1:length(events_of_interest$desired_event_rows)){
+    # This is the index of the event AMONG ALL EVENTS IN THE DATABASE
+    event_row_index = events_of_interest$desired_event_rows[i]
+
+    # Read the initial condition raster
+    event_raster = ptha18$get_initial_condition_for_event(events_of_interest, event_ID=i)
+    # Save the initial condition raster
+    output_raster_file = paste0(plot_outdir, '/initial_condition_DESIRED_EVENT_ROW_', 
+                                event_row_index, '.tif')
+    writeRaster(event_raster, filename = output_raster_file, options=c('COMPRESS=DEFLATE'), 
+                overwrite=TRUE)
+
+    # Make a PNG of the initial condition raster 
+    raster_extent = extent(event_raster)
+    raster_asp = (raster_extent@ymax - raster_extent@ymin)/(raster_extent@xmax - raster_extent@xmin)
+    output_png_file = paste0(plot_outdir, '/initial_condition_DESIRED_EVENT_ROW_', 
+                                event_row_index, '.png')
+    png(output_png_file, width=9, height=max(4, raster_asp*9 + 1), res=200, units='in')
+    plot(event_raster) 
+    title(main=paste0("Tsunami initial condition \n Mw=", events_of_interest$events$Mw[i], 
+                      "; desired_event_row=", event_row_index, "; energy=", 
+                      format(events_of_interest$events$initial_potential_energy[i], digits=3))
+         )
+    dev.off() # Finish plot
+
+    # Make a PNG of the gauges
+    ngauges = length(all_tsunamis_at_gauges$flow)
+    gauge_offset = seq(-ngauges/2, ngauges/2, length=ngauges)*gauge_plot_vertical_spacing
+
+    output_png_file = paste0(plot_outdir, '/tsunami_gauges_DESIRED_EVENT_ROW_', 
+                                event_row_index, '.png')
+    png(output_png_file, width=9, height=9, units='in', res=200)
+    plot(all_tsunamis_at_gauges$time, all_tsunamis_at_gauges$flow[[1]][i,,1] + gauge_offset[1], t='l', 
+         xlim=gauge_plot_xlim, ylim=range(gauge_offset)+gauge_plot_ylim_extra,
+         xlab='Time (seconds post-earthquake)', ylab='Stage (m, with datum vertical offset)')
+    for(j in 1:ngauges){
+        points(all_tsunamis_at_gauges$time, 
+               all_tsunamis_at_gauges$flow[[j]][i,,1] + gauge_offset[j], 
+               t='l')
+    }
+    abline(v=seq(0, 36)*3600, col='grey', lty='dashed')
+    abline(h=gauge_offset, col='grey', lty='dashed')
+    text(gauge_plot_xlim[2] - 0.1*diff(gauge_plot_xlim) + gauge_plot_gaugeID_offset[1], 
+         gauge_offset + gauge_plot_gaugeID_offset[2],
+         names(all_tsunamis_at_gauges$flow), col='blue')
+    title(main=paste0("Tsunami gauge time-series \n Mw=", events_of_interest$events$Mw[i], 
+                 "; desired_event_row=", event_row_index))
+    dev.off()
+    
+}
+```
+
+The code above produces some figures showing the initial condition in the output directory named batch_plots_SRC_kermadectonga2_SLP_variable_uniform_CRV_rate_median_EXRATE_4e-04_STGTOL_0.1_NGAUGE_3. An example is below.
+
+![Example raster plot](batch_plots_SRC_kermadectonga2_SLP_variable_uniform_CRV_rate_median_EXRATE_4e-04_STGTOL_0.1_NGAUGE_3/initial_condition_DESIRED_EVENT_ROW_28628.png)
+
+It also produces some plots of the gauge time-series. Notice the script includes parameters that can be used to control the vertical spacing of the gauges, as well as the plot x-and-y limits, and the gaugeID label placement.
+
+![Example gauges plot](batch_plots_SRC_kermadectonga2_SLP_variable_uniform_CRV_rate_median_EXRATE_4e-04_STGTOL_0.1_NGAUGE_3/tsunami_gauges_DESIRED_EVENT_ROW_28628.png)

@@ -27,6 +27,9 @@ source('R/sum_tsunami_unit_sources.R', local=TRUE)
 #' events data. For example if range_list=list(Mw=c(9.05, 9.15), peak_slip_alongstrike_ind=c(80,90)),
 #' then the selected events will all have Mw in >9.05 and <9.15, and peak_slip_alongstrike_ind >80 and < 90.
 #' If range_list is specified, you should not provide desired_event_rows.
+#' @param chunk_size The chunk_size passed to read_table_from_netcdf. This can impact the efficiency when only
+#' reading a subset of the file. A small chunk size will lead to many reads, whereas a large chunk size may lead
+#' to too much data being read at once. The best size depends on the system and the interconnect.
 #' @return list with 'events' giving summary statistics for the earthquake
 #' events, and 'unit_source_statistics' giving summary statistics for each
 #' unit source, and 'gauge_netcdf_files' giving the tide-gauge netcdf filenames for each unit_source,
@@ -44,7 +47,7 @@ source('R/sum_tsunami_unit_sources.R', local=TRUE)
 #' puysegur_data_Mw81 = get_source_zone_events_data('puysegur', range_list=list(Mw=c(8.05, 8.15), rate_annual=c(0, Inf)))
 #'
 get_source_zone_events_data<-function(source_zone=NULL, slip_type='stochastic', desired_event_rows = NULL,
-                                      range_list=NULL, chunk_size=1000){
+                                      range_list=NULL, chunk_size=1000, include_potential_energy=FALSE){
 
     library(rptha)
 
@@ -91,6 +94,33 @@ get_source_zone_events_data<-function(source_zone=NULL, slip_type='stochastic', 
 
     events_file = nc_web_addr
     events_data = read_table_from_netcdf(events_file, desired_rows = desired_event_rows, chunk_size=chunk_size)
+
+    if(include_potential_energy){
+        # Read the initial condition potential energy information as well
+        potential_energy_data = get_source_zone_events_potential_energy(source_zone, 
+            slip_type, desired_event_rows, chunk_size)
+        # Logical checks
+        if(nrow(potential_energy_data) != nrow(events_data)){
+            stop('error reading potential energy -- not aligned with event_data')
+        }
+
+        # More sanity checks. 
+        # Confirm that Mw, rate_annual, and weight_with_nonzero_rate are the same
+        t1 = all(abs(events_data$Mw - potential_energy_data$Mw) <= 1.e-04)
+        t2 = all(abs(events_data$rate_annual - potential_energy_data$rate_annual) <= 
+                 1.0e-04*events_data$rate_annual)
+        t3 = all(abs(events_data$weight_with_nonzero_rate - potential_energy_data$weight_with_nonzero_rate) <=
+                 1.0e-04*events_data$weight_with_nonzero_rate)
+
+        if(!(t1 & t2 & t3)){
+            stop('Error reading potential energy -- rows may not be aligned')
+        }
+
+        # If we got here, then it all worked
+        events_data$initial_potential_energy = potential_energy_data$initial_potential_energy
+        rm(potential_energy_data)
+        gc()
+    }
 
     # Record the tsunami events file too, although we don't use it here
     tsunami_events_file = paste0(config_env$.GDATA_OPENDAP_BASE_LOCATION, 
@@ -147,6 +177,9 @@ get_source_zone_events_data<-function(source_zone=NULL, slip_type='stochastic', 
 get_initial_condition_for_event<-function(source_zone_events_data, event_ID,
     force_file_download=FALSE){
 
+    if(length(event_ID) != 1){
+        stop('must have (length(event_ID)==1) in get_initial_condition_for_event -- you cannot pass a vector argument')
+    }
     # Shorthand notation
     szed = source_zone_events_data
 
@@ -742,5 +775,266 @@ summarise_events<-function(events_near_desired_stage){
 
     return(data.frame(mws, peak_slip, mean_slip, nsources, peak_slip_alongstrike, 
         magnitude_prop_mid, mh_distance))
+}
+
+#'
+#' Download a DEM with 1 in 'below MSL' and 0 in 'above MSL' regions. This
+#' was derived from the input merged DEM used for the PTHA18, created with
+#' this script (which in turn relies on the other codes in the same directory): 
+#'
+#' https://github.com/GeoscienceAustralia/ptha/blob/master/R/examples/austptha_template/DATA/ELEV/merged_dem/make_wet_or_dry_dem.R
+#' 
+get_wet_or_dry_DEM<-function(force_download_again=FALSE){
+    
+    wet_or_dry_DEM_file = paste0(config_env$.GDATA_HTTP_BASE_LOCATION, 
+        'DATA/wet_or_dry_gebco_ga250_dem_patched.tif')
+
+    output_file = './.wet_or_dry_gebco_ga250_dem_patched/wet_or_dry_gebco_ga250_dem_patched.tif'
+
+    if(file.exists(output_file) & !force_download_again){
+        # We do not need to download the data
+        wd = raster(output_file)
+    }else{
+        # We do need to download the data
+        dir.create(dirname(output_file), showWarnings=FALSE)
+        if(file.exists(wet_or_dry_DEM_file)){
+            file.copy(wet_or_dry_DEM_file, output_file, overwrite=force_download_again)
+        }else{
+            download.file(wet_or_dry_DEM_file, output_file)
+        }
+        wd = raster(output_file)
+        writeRaster(wd, file=output_file, options=c('COMPRESS=DEFLATE'), 
+                    overwrite=force_download_again)
+    }
+
+
+    return(wd)
+}
+
+#' Read the initial potential energy from the precomputed database
+#'
+#' For details on the potential energy calculation, see here: https://github.com/GeoscienceAustralia/ptha/blob/master/R/examples/austptha_template/SOURCE_ZONES/compute_initial_condition_potential_energy.R
+#'
+#' @param source_zone Name of source_zone
+#' @param slip_type 'stochastic' or 'variable_uniform' or 'uniform'
+#' @param desired_event_rows integer vector giving the rows of the table that
+#' are desired. If NULL, read all rows (unless range_list is not NULL, see below)
+#' @param chunk_size The chunk_size passed to read_table_from_netcdf. This can impact the efficiency when only
+#' reading a subset of the file. A small chunk size will lead to many reads, whereas a large chunk size may lead
+#' to too much data being read at once. The best size depends on the system and the interconnect.
+#'
+get_source_zone_events_potential_energy<-function(source_zone, slip_type='stochastic', 
+    desired_event_rows=NULL, chunk_size=1000){
+
+    # First check that a valid source-zone was provided
+    err = FALSE
+    if(is.null(source_zone)){
+        err = TRUE
+    }else{
+        if(sum(config_env$source_names_all == source_zone) == 0) err=TRUE
+    }
+
+    if(err){
+        print('You did not pass a valid source_zone to get_source_zone_events_data. The allowed source_zone values are:')
+        print(paste0('   ', config_env$source_names_all))
+        print('Please pass one of the above source_zone names to this function to get its metadata')
+        # Fail gracefully
+        output = list(initial_potential_energy = NA, rate_annual=NA, 
+                      weight_with_nonzero_rate = NA, Mw = NA)
+        return(invisible(output))
+    }
+
+    library(rptha)
+
+    nc_web_addr = paste0(config_env$.GDATA_OPENDAP_BASE_LOCATION, 
+        'SOURCE_ZONES/', source_zone, '/TSUNAMI_EVENTS/POTENTIAL_ENERGY_all_', slip_type, 
+        '_slip_earthquake_events_', source_zone, '_POTENTIAL_ENERGY.nc')
+
+    potential_energy_data = read_table_from_netcdf(nc_web_addr, 
+        desired_rows=desired_event_rows, chunk_size=chunk_size)
+
+    return(potential_energy_data)
+
+}
+
+#' Randomly sample scenarios given their magnitudes and rates
+#'
+#' Generate a random sample of PTHA18 scenarios from a source-zone, with
+#' sampling stratified by magnitude. Within each magnitude, the chance of each
+#' event being sampled is proportional to the event_rate, optionally multiplied
+#' by a user-specified event_importance (defaults to 1). 
+#'
+#' @param event_rates vector of PTHA18 scenario rates (one for each scenario)
+#' @param event_Mw vector of PTHA18 scenario magnitudes (one for each scenario) 
+#' The values must be in 7.2, 7.3, ...9.6, 9.7, 9.8 as for PTHA18.
+#' @param event_importance if not NULL, then a vector of non-negative numbers
+#' (one for each scenario) giving the "importance" of each scenario. By default
+#' this is treated as a constant (=1). For each magnitude, the probability of
+#' sampling the scenario is proportional to "event_rates * event_importance",
+#' so events with higher importance are more likely to be sampled than they
+#' otherwise would be. The output scenario rates are adjusted to account for
+#' this, so the resulting set of scenarios and rates can still be treated as a
+#' random sample from the source-zone. But this sample will better resolve
+#' scenarios with higher importance, and more poorly resolve scenarios with
+#' lower importance.
+#' @param samples_per_Mw a function returning the number of scenarios to sample
+#' for each magnitude.
+#' @param mw_limits only sample from magnitudes greater than mw_limits[1], and
+#' less than mw_limits[2]
+#' @param return_as_table convert the output to a data.frame, rather than a list of lists.
+#' @return a data.frame (if return_as_table=TRUE) or a list of lists (one per magnitude). 
+#' Each contains the overall rate of scenarios with the given magnitude
+#' (rate_with_this_mw), the magnitude (mw), the random scenario indices
+#' corresponding to event_rates and event_Mw (inds), the product of the
+#' rate_with_this_mw and the standard importance sampling weights for each
+#' scenario (importance_sampling_scenario_rates), the product of the
+#' rate_with_this_mw and the self-normalised importance sampling weights for
+#' each scenario (importance_sampling_scenario_rates_self_normalised), the
+#' standard importance sampling weights for each scenario, which may not sum to
+#' 1, but do so on average, and lead to unbiased integral estimates
+#' (importance_sampling_scenario_weights), and the self-normalised importance
+#' sampling weights for each scenario, which will sum to 1, but lead to
+#' integral estimates that can be biased (but are asymptotically unbiased).
+#' @details The function returns either a data.frame or a list of lists (one per unique magnitude)
+#' containing the random scenario indices, and associated rates that can be
+#' assigned to each scenario for consistency with the PTHA18. The rates are
+#' computed with importance sampling, and provide statistical consistency with
+#' the PTHA18 even if a non-uniform event_importance is specified. Two
+#' alternative importance-sampling based rates are provided. These only differ
+#' when the event_importance is specified and non-uniform within a magnitude.
+#' One partitions the rate using "standard importance sampling weights":
+#'     (1/number_of_random_scenarios) * [ 
+#'       ( PTHA18 conditional probability for the magnitude ) / 
+#'       ( (event_rates * event_importance) for the magnitude, normalised to a density)
+#'         ]  
+#' where the terms in [ ] are evaluated at the randomly selected scenarios. The
+#' other uses "self-normalised importance sampling weights":
+#'     [ (1/event_importance_for_the_randomly_selected_scenarios )/
+#'     sum( 1/event_importance_for_the_randomly_selected_scenarios) ]
+#' To partition the rates among scenarios for each Mw, we multiply these by the
+#' rate of scenarios with the given Mw. Each method has different strengths and
+#' weaknesses. The former importance sampling based rates can be used to
+#' compute unbiased estimates of integrals, whereas the latter is only
+#' asymptotically unbiased as the number of scenarios approaches infinity.
+#' However the standard importance sampling weights do not necessarily sum to
+#' 1, so lead to inconsistencies with the PTHA18 rates for each magnitude,
+#' whereas the self-normalised importance sampling weights retain consistency
+#' with the PTHA18 rates for each magnitude. Depending on the application, one
+#' may prefer one or the other.
+#' 
+randomly_sample_scenarios_by_Mw_and_rate<-function(
+    event_rates,
+    event_Mw,
+    event_importance = NULL,
+    samples_per_Mw=function(Mw){round(50 + 0*Mw)},
+    mw_limits=c(7.15, 9.85),
+    return_as_table=TRUE){
+
+    unique_Mw = sort(unique(event_Mw))
+
+    diff_unique_Mw = diff(unique_Mw)
+
+    if(length(diff_unique_Mw) > 1){
+
+        # Confirm that our expectations of PTHA18 scenarios are met.
+        if(any(abs(diff_unique_Mw - diff_unique_Mw[1]) > 1.0e-06) ){
+            stop('event_Mw is not evenly spaced')
+        }
+    }
+
+    # Ignore small scenarios, and scenarios exceeding Mw-max
+    unique_Mw = unique_Mw[ ((unique_Mw > mw_limits[1]) & 
+                            (unique_Mw < mw_limits[2])) ] 
+
+    # By default give all scenarios equal importance.
+    if(is.null(event_importance)) event_importance = event_Mw * 0 + 1
+
+    # Sanity check on inputs
+    if( any( (event_rates < 0) | (event_importance < 0)) ){
+        stop('event_rates and event_importance must be nonnegative')
+    }
+
+    random_scenario_info = lapply(unique_Mw,
+        f<-function(mw){
+            # Match Mw [careful with real numbers]
+            k = which(abs(event_Mw - mw) < 1.0e-03)
+            if(length(k) <= 1){
+                stop('error: Only one scenario -- need to be careful using sample below')
+            }
+
+            # Get the rate of any event with this mw
+            rate_with_this_mw = sum(event_rates[k])
+            nsam = round(samples_per_Mw(mw))
+
+            if((nsam > 0) & sum(event_rates[k] * event_importance[k]) > 0){
+
+                local_sample = sample(1:length(k), size=nsam, 
+                    prob=event_rates[k]*event_importance[k], 
+                    replace=TRUE)
+                sample_of_k = k[local_sample]
+
+                # The original scenario conditional probability distribution
+                dist_f = event_rates[k]/sum(event_rates[k])
+                # The distribution we sampled from above
+                dist_g = (event_rates[k]*event_importance[k]) / 
+                      sum(event_rates[k]*event_importance[k])
+                # The exact importance-sampling correction -- while these
+                  # weights do not sum to 1, they make the estimators unbiased
+                alternate_weights = (1/length(local_sample)) *
+                    (dist_f[local_sample] / dist_g[local_sample])
+
+                # Importance sampling correction -- this is the
+                # 'self-normalised' approach.
+                # Estimate a rate for each individual scenario such that the
+                # sampled scenario weights add to the target weight, and
+                # reflect the original distribution
+                # Their chance of being sampled was inflated by
+                # 'event_importance', so we deflate by 'event_importance' here.
+                random_scenario_rates = rate_with_this_mw * 
+                    (1/event_importance[sample_of_k]) / 
+                    sum((1/event_importance[sample_of_k]))
+
+                # Importance sampling correction -- although "alternate_weights"
+                # does not sum to 1, the self normalised importance sampling
+                # leads to some finite-sample-bias in integral estimates,
+                # whereas this approach is unbiased even in finite samples.
+                alternate_random_scenario_rates = 
+                    rate_with_this_mw * alternate_weights
+
+                return(data.frame(
+                    inds = sample_of_k, 
+                    mw = rep(mw, nsam),
+                    rate_with_this_mw = rep(rate_with_this_mw, nsam),
+                    # Regular importance sampling
+                    importance_sampling_scenario_rates = 
+                        alternate_random_scenario_rates, 
+                    # Self-normalised importance sampling
+                    importance_sampling_scenario_rates_self_normalised = 
+                        random_scenario_rates, 
+                    importance_sampling_scenario_weights = alternate_weights,
+                    importance_sampling_scenario_weights_self_normalised = 
+                        random_scenario_rates/rate_with_this_mw 
+                    ))
+            }else{
+                # Case with all rates=0
+                return(data.frame(
+                    inds = NA, 
+                    mw = mw,
+                    rate_with_this_mw = rate_with_this_mw,
+                    importance_sampling_scenario_rates = NA, 
+                    importance_sampling_scenario_rates_self_normalised = NA,
+                    importance_sampling_scenario_weights = NA,
+                    importance_sampling_scenario_weights_self_normalised = NA
+                    ))
+            }
+        })
+
+    if(return_as_table){
+        if(length(random_scenario_info) > 1){
+            random_scenario_info = do.call(rbind, random_scenario_info)
+        }
+    }
+
+    return(random_scenario_info)
 }
 

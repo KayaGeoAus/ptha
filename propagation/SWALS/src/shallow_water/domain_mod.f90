@@ -21,7 +21,7 @@ module domain_mod
                           wall_elevation, &
                           default_output_folder, &
                           send_boundary_flux_data,&
-                          force_double, long_long_ip
+                          force_double, force_long_double, long_long_ip
     use timer_mod, only: timer_type
     use timestepping_metadata_mod, only: timestepping_metadata, &
         setup_timestepping_metadata, timestepping_method_index
@@ -210,6 +210,12 @@ module domain_mod
             !! Useful variable to distinguish staggered-grid and centred-grid numerical methods
         logical :: adaptive_timestepping = .true.
             !! Can the time-step vary over time?
+        real(dp) :: local_timestepping_scale = 1.0_dp
+            !! If LOCAL_TIMESTEP_PARTITIONED_DOMAINS is used in a multidomain, then the partitioned domain's time-step 
+            !! may be increased above that implied by its timestep_refinement_factor, up to 
+            !! (local_timestepping_scale * domain%max_dt). The idea is that local_timestepping_scale
+            !! can be set to a value between [0-1], with smaller values making for a less aggressive 
+            !! local-timestep increase. This can help with stability on some occasions.
 
         real(dp) :: cliffs_minimum_allowed_depth = 0.001_dp
             !! The CLIFFS solver seems to require tuning of the minimum allowed depth (and often it should
@@ -268,6 +274,11 @@ module domain_mod
             !! This can be used to pass arbitrary data to the user-specified forcing_subroutine.
             !! The latter takes the domain as an argument, so one can access the forcing_context
             !! via that.
+        logical :: support_elevation_forcing = .FALSE.
+            !! If the forcing_patch_type tries to evolve the elevation, but support_elevation_forcing is FALSE, then
+            !! the code will throw an error. The value of this variable will be overridden automatically for schemes
+            !! where forcing the elevation is always OK. For other schemes one can manually set this to TRUE, and
+            !! the code will do extra calculations to enable elevation forcing. 
 
         ! 
         ! Mass conservation tracking  -- store as double, even if dp is single prec.
@@ -537,10 +548,10 @@ TIMER_START('printing_stats')
         write(domain%logfile_unit, *) 'Speed: '
         write(domain%logfile_unit, *) '        ', maxspeed
         write(domain%logfile_unit, *) '        ', minspeed
-        write(domain%logfile_unit, "(A, ES20.12)") 'Energy Potential / rho (zero when stage=domain%msl_linear): ', &
+        write(domain%logfile_unit, "(A, ES25.12E3)") 'Energy Potential / rho (zero when stage=domain%msl_linear): ', &
                                       energy_potential_on_rho
-        write(domain%logfile_unit, "(A, ES20.12)") 'Energy Kinetic / rho: ', energy_kinetic_on_rho
-        write(domain%logfile_unit, "(A, ES20.12)") 'Energy Total / rho: ', energy_total_on_rho
+        write(domain%logfile_unit, "(A, ES25.12E3)") 'Energy Kinetic / rho: ', energy_kinetic_on_rho
+        write(domain%logfile_unit, "(A, ES25.12E3)") 'Energy Total / rho: ', energy_total_on_rho
         ! Mass conservation check
         write(domain%logfile_unit, *) 'Mass Balance (domain interior): ', domain%mass_balance_interior()
 
@@ -565,11 +576,16 @@ TIMER_STOP('printing_stats')
             !! Kinetic energy/water-density. 
         real(dp), intent(out) :: energy_total_on_rho
 
+
         logical :: is_nesting, is_wet, use_truely_linear_method
         integer(ip) :: ecw, i, j
         real(dp) :: depth_C, depth_N, depth_E, depth_N_inv, depth_E_inv, speed_sq
         ! Ensure the energy accumulation uses high precision, easy to lose precision here.
-        real(force_double) :: e_potential_on_rho, e_kinetic_on_rho, e_total_on_rho, e_flow, e_constant, w0, d1, w2, d3
+        integer(ip), parameter :: e_prec = force_double ! force_long_double
+        real(e_prec) :: e_potential_on_rho, e_kinetic_on_rho, e_total_on_rho, e_flow, e_constant, w0, d1, w2, d3
+
+        !print*, "e_prec: ", e_prec
+        !print*, "domain%msl_linear: ", domain%msl_linear
 
         ! If nesting is occurring, the above stats are only computed
         ! in the priority domain area
@@ -580,8 +596,8 @@ TIMER_STOP('printing_stats')
         maxspeed = 0.0_dp ! speed is always > 0
         minstage = HUGE(1.0_dp)
         minspeed = 0.0_dp ! speed is always > 0
-        e_potential_on_rho = 0.0_force_double
-        e_kinetic_on_rho = 0.0_force_double
+        e_potential_on_rho = 0.0_e_prec
+        e_kinetic_on_rho = 0.0_e_prec
 
         ecw = domain%exterior_cells_width
 
@@ -596,10 +612,11 @@ TIMER_STOP('printing_stats')
         maxspeed = 0.0_dp ! speed is always > 0
         minstage = HUGE(1.0_dp)
         minspeed = 0.0_dp ! speed is always > 0
-        e_potential_on_rho = 0.0_force_double
-        e_kinetic_on_rho = 0.0_force_double
+        e_potential_on_rho = 0.0_e_prec
+        e_kinetic_on_rho = 0.0_e_prec
 
-        ! If we are using a 'truely-linear' solver then the depth is always recorded from MSL.
+        ! If we are using a 'truely-linear' solver then the depth is always recorded from MSL for certain
+        ! calculations (pressure gradient term, and wetting/drying)
         use_truely_linear_method = domain%is_staggered_grid .and. domain%linear_solver_is_truely_linear .and. &
             any(domain%timestepping_method == [character(len=charlen) :: 'linear', 'leapfrog_linear_plus_nonlinear_friction'])
 
@@ -627,20 +644,25 @@ TIMER_STOP('printing_stats')
                 ! This can be rearranged noting (depth = stage - elev) to give
                 !     Integral of [ (g/2 stage^2 - g/2 elev^2) ] 
                 ! ('difference of 2 squares')
-                w0 = real(domain%U(i,j,STG), force_double) + real(domain%U(i,j,ELV), force_double)
-                d1 = real(domain%U(i,j,STG), force_double) - real(domain%U(i,j,ELV), force_double)
-                e_flow = merge( w0*d1, 0.0_force_double, is_wet)
+                w0 = real(domain%U(i,j,STG), e_prec) + real(domain%U(i,j,ELV), e_prec)
+                d1 = real(domain%U(i,j,STG), e_prec) - real(domain%U(i,j,ELV), e_prec)
+                e_flow = merge( w0*d1, 0.0_e_prec, is_wet)
                 ! Once integrated the g/2 elev^2 term will be a constant if the bathymetry is fixed and there is no wetting and
                 ! drying. We are only interested in changes in integrated energy, and subtracting that constant recovers the
                 ! (g/2 stage^2) formulation of potential energy, which is typically used for the linear shallow water equations in
                 ! deep ocean tsunami type cases.
-                w2 = real(domain%msl_linear, force_double) + real(domain%U(i,j,ELV), force_double)
-                d3 = real(domain%msl_linear, force_double) - real(domain%U(i,j,ELV), force_double)
-                e_constant = merge( w2*d3, 0.0_force_double, domain%msl_linear > domain%U(i,j,ELV) + minimum_allowed_depth)
+                w2 = real(domain%msl_linear, e_prec) + real(domain%U(i,j,ELV), e_prec)
+                d3 = real(domain%msl_linear, e_prec) - real(domain%U(i,j,ELV), e_prec)
+                e_constant = merge( w2*d3, 0.0_e_prec, domain%msl_linear > domain%U(i,j,ELV) + minimum_allowed_depth)
                     ! e_constant must be COMPLETELY UNAFFECTED by changes in the flow - it is a constant offset.
 
+                ! ! Here is the classical form of available potential energy (which works without wetting/drying)
+                !w0 = (real(domain%U(i,j,STG), e_prec) - real(domain%msl_linear, e_prec))**2
+                !e_flow = merge(w0, 0.0_e_prec, is_wet)
+                !e_constant = 0.0_e_prec
+
                 e_potential_on_rho = e_potential_on_rho + &
-                    real(domain%area_cell_y(j) * gravity * 0.5_dp, force_double) * (e_flow - e_constant)
+                    real(domain%area_cell_y(j) * gravity * 0.5_dp, e_prec) * (e_flow - e_constant)
 
                 if(is_wet) then
 
@@ -687,7 +709,7 @@ TIMER_STOP('printing_stats')
                             (domain%area_cell_y(j) * domain%U(i,j,UH) * domain%U(i,j,UH) * depth_E_inv + &
                             0.5_dp * (domain%area_cell_y(j) + domain%area_cell_y(j+1)) * &
                                 domain%U(i,j,VH) * domain%U(i,j,VH) * depth_N_inv  ), &
-                            force_double)
+                            e_prec)
  
                     else
                         ! Co-loated grid
@@ -697,7 +719,7 @@ TIMER_STOP('printing_stats')
 
                         ! The kinetic energy is integral of ( 1/2 depth speed^2)
                         e_kinetic_on_rho = e_kinetic_on_rho + real(domain%area_cell_y(j) * &
-                            0.5_dp * depth_C * speed_sq, force_double)
+                            0.5_dp * depth_C * speed_sq, e_prec)
                      end if
 
                     maxspeed = max(maxspeed, speed_sq) ! Will undo the sqrt later.
@@ -712,10 +734,12 @@ TIMER_STOP('printing_stats')
         ! Convert 'speed**2' to 'speed'
         maxspeed = sqrt(maxspeed)
         minspeed = sqrt(minspeed)
-        ! Copy energies (in force_double) precision back to possibly lower precision input var
+        ! Copy energies (in e_prec) precision back to possibly lower precision input var
         energy_kinetic_on_rho = e_kinetic_on_rho
         energy_potential_on_rho = e_potential_on_rho
         energy_total_on_rho = e_potential_on_rho + e_kinetic_on_rho
+
+        !print*, "energies: ", e_potential_on_rho + e_kinetic_on_rho, e_potential_on_rho, e_kinetic_on_rho
 
     end subroutine
 
@@ -795,6 +819,22 @@ TIMER_STOP('printing_stats')
         ! Flag to note if the grid should be interpreted as staggered
         domain%is_staggered_grid = (timestepping_metadata(tsi)%is_staggered_grid == 1)
         domain%adaptive_timestepping = timestepping_metadata(tsi)%adaptive_timestepping
+
+        ! Determine whether we allow domain%forcing_subroutine to update the elevation
+        if(timestepping_metadata(tsi)%forcing_elevation_is_allowed == 'always') then
+            domain%support_elevation_forcing=.TRUE.
+        end if
+        ! Note that if: 
+        !     timestepping_metadata(tsi)%forcing_elevation_is_allowed == 'optional'
+        ! then one can manually set domain%support_elevation_forcing=TRUE, prior to this function.
+        ! However, one cannot do that if:
+        !     timestepping_metadata(tsi)%forcing_elevation_is_allowed == 'never'
+        if(timestepping_metadata(tsi)%forcing_elevation_is_allowed == 'never' .and. &
+            domain%support_elevation_forcing) then
+            write(log_output_unit, *) 'Error: The numerical scheme ', trim(domain%timestepping_method)
+            write(log_output_unit, *) 'does not allow forcing of elevation.'
+            call generic_stop
+        end if
 
 
         if(use_partitioned_comms) then
@@ -1004,13 +1044,23 @@ TIMER_STOP('printing_stats')
     
             ! If we use complex timestepping we need to back-up U for variables 1-3
             if (domain%timestepping_method /= 'euler') then
-                allocate(domain%backup_U(nx, ny, STG:VH))
+                ! For these schemes, if domain%forcing_subroutine modifies the elevation, then
+                ! we need to include elevation in domain%backup_U, and time-step the elevation like
+                ! other variables. This adds some storage and computation, so we do not enable it by
+                ! default.
+                if(domain%support_elevation_forcing) then
+                    allocate(domain%backup_U(nx, ny, STG:ELV))
+                else
+                    allocate(domain%backup_U(nx, ny, STG:VH))
+                end if
                 !$OMP PARALLEL DEFAULT(PRIVATE) SHARED(domain, ny)
-                !$OMP DO SCHEDULE(STATIC)
-                do j = 1, ny
-                    domain%backup_U(:,j,STG:VH) = ZERO_dp
+                do k = 1, size(domain%backup_U, 3)
+                    !$OMP DO SCHEDULE(STATIC)
+                    do j = 1, ny
+                        domain%backup_U(:,j,k) = ZERO_dp
+                    end do
+                    !$OMP END DO NOWAIT
                 end do
-                !$OMP END DO
                 !$OMP END PARALLEL
             end if
 
@@ -1379,13 +1429,13 @@ TIMER_STOP('printing_stats')
         !TIMER_START('backup')
 
         !$OMP PARALLEL DEFAULT(PRIVATE) SHARED(domain)
-        !$OMP DO SCHEDULE(STATIC), COLLAPSE(2)
-        do k = STG, VH
+        do k = STG, size(domain%backup_U, 3)
+            !$OMP DO SCHEDULE(STATIC)
             do j = 1, domain%nx(2)
                 domain%backup_U(:, j, k) = domain%U(:, j, k)
             end do
+            !$OMP END DO NOWAIT
         end do
-        !$OMP END DO 
         !$OMP END PARALLEL
 
         !TIMER_STOP('backup')

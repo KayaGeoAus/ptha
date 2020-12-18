@@ -29,9 +29,14 @@ combinations of the unit sources. Currently rptha supports uniform slip
 earthquakes with dimensions determined to (approximately) agree with the
 scaling relations of Strasser et al. (2010). See the function
 `get_all_earthquake_events` in the rptha package. Modifications are required to
-treat non-uniform slip earthquakes, but for an example of making tsunami
+treat non-uniform slip earthquakes. For an example of making tsunami
 initial conditions for complex earthquake scenarios, see
-[here](examples/combine_tsunami_sources/combine_tsunami_sources.R).
+[here](examples/combine_tsunami_sources/combine_tsunami_sources.R). In the
+[2018 Australian PTHA](http://dx.doi.org/10.11636/Record.2018.041) we treated non-uniform slip
+earthquakes by associating a set of them with a `parent' uniform-slip
+earthquake; see codes associated with that project [here](examples/austptha_template) and
+papers on the approach [here](https://link.springer.com/article/10.1007/s00024-019-02299-w) 
+and [here](https://doi.org/10.1093/gji/ggz260)
 
 * Compute the tsunami associated with each earthquake event. In
 realistic PTHA applications this is the most computationally demanding part of
@@ -47,13 +52,16 @@ scripts to make these are [here](examples/make_hazard_points).
   * If nonlinear solvers are required, then the user must first create the 
 initial conditions for each event (by linearly combining the unit source
 initial conditions), and then run each through the nonlinear propagation code. 
-See [here](examples/combine_tsunami_sources/combine_tsunami_sources.R) for an example.
+See [here](examples/combine_tsunami_sources/combine_tsunami_sources.R) for an example
+of linearly combining tsunami water surface deformations.
 
 * Assign an mean annual rate to each event in the earthquake catalogue. This
 is based on seismic moment conservation principles, and requires the user to
 specify the source-zone convergence rate and various other parameters
 controlling seismicity. Uncertainties can be accounted for using a logic tree.
-See the the example script [here](examples/event_rates/single_source_rate_computation.R).
+See the the example script [here](examples/event_rates/single_source_rate_computation.R),
+and a relatively complex global-scale application for the 2018 Australian PTHA
+[here](examples/austptha_template/EVENT_RATES).
 
 
 Installation from source

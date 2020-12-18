@@ -47,7 +47,7 @@ MINIMUM_ALLOWED_MW_MAX = config$MINIMUM_ALLOWED_MW_MAX  # 7.65
 dMw = config$dMw # 0.1
 
 # Only assign non-zero probability to earthquakes with Mw greater than this
-MW_MIN = config$MW_MIN # 7.45
+MW_MIN = config$MW_MIN # 
 
 # We ensure that (Mw_max >= maximum_observed_mw + mw_observed_perturbation)
 # This ensures that no logic-tree curve assigns zero probability to the largest
@@ -1577,7 +1577,7 @@ write_rates_to_event_table<-function(source_env, scale_rate=1.0,
                 k = which(event_uniform_event_row == euer)
 
                 bias_adjuster = rep(0, length(k))
-                # We must zero rate for events with peak_slip <= allowed value
+                # We must zero rate for events with peak_slip > allowed value
                 acceptable_k = which(event_peak_slip[k] <= allowed_peak_slip[k])
                 if(length(acceptable_k) > 0){
                     # Weight individual events, based on the 'bias adjustment' functions devised by

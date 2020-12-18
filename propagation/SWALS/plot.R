@@ -9,10 +9,7 @@
 # state is received from other domains), and other regions where it is the
 # "priority domain". In the halo regions the values that are stored in output
 # files should not be used (because some other domain is the priority domain in
-# those regions). In some cases the halo values can very misleading (e.g. for
-# maximum stage, the halo values can be dominated by boundary artefacts - note
-# those artefacts never affect the domain interior, due to the design of our
-# halo updates). In sum, care is required to combine results from multiple domains
+# those regions). In sum, care is required to combine results from multiple domains
 # while only using "priority domain" cells. 
 #
 
@@ -444,6 +441,42 @@ get_multidomain<-function(multidomain_dir, ...){
     return(md)
 }
 
+#' Get the times at which grids or gauges are output in the multidomain
+#'
+#' Sometimes it is useful to know how many times there are
+#'
+#' @param multidomain_dir Directory containing the multidomain
+#' @param output_type either 'grids' (default) or 'gauges'
+#' @return a vector of times at which the 'grids' or 'gauges' are output
+#'
+get_multidomain_output_times<-function(multidomain_dir, output_type='grids'){
+    library(ncdf4)
+
+    if(!file.exists(multidomain_dir)){
+        stop(paste0('Could not find multidomain_dir ', multidomain_dir))
+    }
+
+    # Find the netcdf grid or gauges files, depending 
+    if(output_type =='grids'){
+        target_files = Sys.glob(paste0(multidomain_dir, '/RUN_*/Grid_output_*.nc'))
+    }else if(output_type == 'gauges'){
+        target_files = Sys.glob(paste0(multidomain_dir, '/RUN_*/Gauges_data_*.nc'))
+    }else{
+        stop(paste0('output_type should be "grids" or "gauges", but I got: ', output_type))
+    }
+
+
+    if(length(target_files) < 1){
+        stop(paste0('Could not find any files holding ', output_type, ' in multidomain ', multidomain_dir))
+    }
+
+    fid = nc_open(target_files[1], readunlim=FALSE)
+    time = as.numeric(ncvar_get(fid, 'time'))
+    nc_close(fid)
+
+    return(time)
+}
+
 #' Convert peak stage output to raster using the domain object.
 #'
 #' Instead consider using 'merge_domains_nc_grids' which will combine partitioned domains, and
@@ -529,10 +562,13 @@ make_max_stage_raster<-function(swals_out, proj4string='+init=epsg:4326', na_abo
 #' @param buffer_is_priority_domain. If TRUE, replace "is_priority_domain" with a version that is TRUE
 #' even if the neighbouring cell is a priority domain. This is an attempt to remove gaps in the image that
 #' can occur if we use a spatial_stride != 1 
+#' @param asp plot x-y aspect ratio
+#' @param fields_axis_args If use_fields=TRUE, then this list is passed to image.plot(..., axis.args=fields_axis_args).
+#' It can be used to control the labels on the colourbar.
 #' @return Nothing, but make the plot.
 multidomain_image<-function(multidomain_dir, variable, time_index, xlim, ylim, zlim, cols, add=FALSE,
     var_transform_function = NULL, NA_if_stage_not_above_elev = FALSE, use_fields=FALSE, clip_to_zlim=FALSE,
-    buffer_is_priority_domain=FALSE, asp=1){
+    buffer_is_priority_domain=FALSE, asp=1, fields_axis_args=list()){
 
     library('ncdf4')
     library(fields)
@@ -541,7 +577,8 @@ multidomain_image<-function(multidomain_dir, variable, time_index, xlim, ylim, z
 
     # Start a new plot
     if(use_fields){
-        if(!add) image.plot(matrix(0, ncol=2, nrow=2), asp=asp, xlim=xlim, ylim=ylim, zlim=zlim, col=cols, nlevel=length(cols)+1)
+        if(!add) image.plot(matrix(0, ncol=2, nrow=2), asp=asp, xlim=xlim, ylim=ylim, zlim=zlim, 
+                            col=cols, nlevel=length(cols)+1, axis.args=fields_axis_args)
     }else{
         if(!add) image(matrix(0, ncol=2, nrow=2), asp=asp, col='white', xlim=xlim, ylim=ylim, zlim=zlim)
     }

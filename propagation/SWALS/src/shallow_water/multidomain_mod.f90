@@ -231,6 +231,7 @@ module multidomain_mod
         procedure :: send_halos => send_multidomain_halos
         procedure :: recv_halos => receive_multidomain_halos
         procedure :: separate_halos => separate_fine_halos_from_their_domain
+        procedure :: communicate_max_U => communicate_max_U
         ! Memory tracking
         procedure :: memory_summary => memory_summary
         ! Convenience
@@ -238,6 +239,7 @@ module multidomain_mod
         procedure :: finalise_and_print_timers => finalise_and_print_timers
         procedure :: set_point_gauges_from_csv => set_point_gauges_from_csv
         procedure :: stationary_timestep_max => stationary_timestep_max
+        procedure :: check_for_overflow => check_for_overflow
         ! IO
         procedure :: write_outputs_and_print_statistics => write_outputs_and_print_statistics
 
@@ -309,6 +311,158 @@ module multidomain_mod
             print*, 'Make sure periodic_ys covers the input y-range of the multidomain'
         end if
 
+    end subroutine
+
+
+    ! Scan domains for unreasonably large numbers or NaN issues
+    subroutine check_for_overflow(md, flag, domain_ind)
+        class(multidomain_type), intent(inout) :: md
+        character(len=*) :: flag
+        integer(ip), optional, intent(in):: domain_ind
+
+        logical :: throw_error
+        integer(ip) :: i1, i2, i3, j, d1, d2
+        real(dp), parameter :: bignum = HUGE(1.0)/2.0 ! Deliberate single-precision number
+       
+        if(present(domain_ind)) then
+            d1 = domain_ind
+            d2 = domain_ind
+        else
+            d1 = 1
+            d2 = size(md%domains)
+        end if
+
+        throw_error = .FALSE.
+        do j = d1, d2
+            do i1 = STG, ELV
+                do i2 = 1, md%domains(j)%nx(2)
+                    do i3 = 1, md%domains(j)%nx(1)
+                        if((md%domains(j)%U(i3, i2, i1) >  bignum) .or. &
+                           (md%domains(j)%U(i3, i2, i1) < -bignum) .or. &
+                           (md%domains(j)%U(i3, i2, i1) /= md%domains(j)%U(i3, i2, i1))) then
+                           throw_error = .TRUE.
+                           write(log_output_unit,*) flag
+                           write(log_output_unit,*) 'md%domains(', j,')%U(', i3, i2, i1, ')'
+                           write(log_output_unit,*) md%domains(j)%U(i3, i2, i1)
+                           write(log_output_unit,*) 'x: ', md%domains(j)%x(i3), '; y: ', md%domains(j)%y(i2)
+                           write(log_output_unit,*) 'time: ', md%domains(j)%time
+                           write(log_output_unit,*) 'stg:elv, ', md%domains(j)%U(i3, i2, STG:ELV)
+                           if(md%domains(j)%nesting%my_index > 0) then
+                               write(log_output_unit,*) 'priority domain index'
+                               write(log_output_unit,*) md%domains(j)%nesting%priority_domain_index(i3, i2)
+                               write(log_output_unit,*) 'priority domain image'
+                               write(log_output_unit,*) md%domains(j)%nesting%priority_domain_image(i3, i2)
+                           end if
+                        end if
+                    end do
+                end do
+            end do
+        end do 
+
+        if(throw_error) then
+            flush(log_output_unit)
+            call generic_stop
+        end if
+
+
+    end subroutine
+
+
+    ! Communicate max-stage array in halo regions.
+    !
+    ! Often max-stage values in non-priority domain areas are clearly wrong 
+    ! (because during timestepping we allow halos to become invalid -- we only 
+    ! communicate frequently enough to ensure validity of priority domain areas - and
+    ! the max-stage is thus derived from the invalid values).
+    ! That's not really a problem (because we should never use non-priority-domain
+    ! cell values), but for visualisation it is nice to correct them before the end
+    ! of the simulation. 
+    !
+    ! Here we make max_U consistent between domains by:
+    ! A) Swapping max_U and domain%U
+    ! B) Communicating
+    ! C) Swapping domain%U and max_U
+    !
+    subroutine communicate_max_U(md)
+        class(multidomain_type), intent(inout) :: md
+
+        integer(ip) :: j, i, k, n, j1
+        real(dp) :: swapper
+
+        ! Preliminaries: Check that all domains are storing max_U.
+        ! If they are not, do a quick exit
+        do j = 1, size(md%domains)
+            if(.not. md%domains(j)%record_max_U) then
+                write(log_output_unit) 'Note: Not communicating max_U values because not all domains record_max_U.'
+                return
+            end if 
+        end do
+
+        ! Check the array dimensions are compatible with our logic
+        do j = 1, size(md%domains)
+            n = size(md%domains(j)%max_U, 3)
+            if(n > size(md%domains(j)%U, 3)) then 
+                write(log_output_unit) 'Error (not fatal): Will not communicate max_U values because it contains '
+                write(log_output_unit) 'more variables than domain%U, which we use as a scratch space. Skipping'
+                return
+            end if
+
+            if( (size(md%domains(j)%max_U, 1) /= size(md%domains(j)%U, 1)) .or. &
+                (size(md%domains(j)%max_U, 2) /= size(md%domains(j)%U, 2)) ) then
+                write(log_output_unit) 'Error (not fatal): Will not communicate max_U values because its dimensions '
+                write(log_output_unit) 'are not consistent with domain%U, which we use as a scratch space. Skipping'
+                return
+            end if
+        end do
+
+        ! Swap max_U and domain%U, without using signifiant extra memory
+        do j = 1, size(md%domains)
+            n = size(md%domains(j)%max_U, 3)
+            do k = 1, n
+                do j1 = 1, size(md%domains(j)%max_U, 2)
+                    do i = 1, size(md%domains(j)%max_U, 1)
+                        swapper = md%domains(j)%U(i, j1, k)
+                        md%domains(j)%U(i, j1, k) = md%domains(j)%max_U(i, j1, k)
+                        md%domains(j)%max_U(i, j1, k) = swapper
+                    end do
+                end do
+            end do
+        end do
+
+        ! Communicate between domains
+        call md%send_halos(send_to_recv_buffer = send_halos_immediately)
+
+        if(.not. send_halos_immediately) then
+            ! Do all the coarray communication in one hit
+            ! This lets us 'collapse' multiple sends to a single image,
+            ! and is more efficient in a bunch of cases.
+            TIMER_START('comms1')
+            call communicate_p2p
+            TIMER_STOP('comms1')
+        end if
+        
+        ! Get the halo information from neighbours
+        ! For coarray comms, we need to sync before to ensure the information is sent, and
+        ! also sync after to ensure it is not overwritten before it is used
+        call md%recv_halos(sync_before=sync_before_recv, sync_after=sync_after_recv)
+
+        ! Now domain%U contains the max_U variable, updated consistently between domains,
+        ! whereas the max_U variable contains the value of domain%U. Swap them 
+        do j = 1, size(md%domains)
+            n = size(md%domains(j)%max_U, 3)
+            do k = 1, n
+                do j1 = 1, size(md%domains(j)%max_U, 2)
+                    do i = 1, size(md%domains(j)%max_U, 1)
+                        swapper = md%domains(j)%U(i, j1, k)
+                        md%domains(j)%U(i, j1, k) = md%domains(j)%max_U(i, j1, k)
+                        md%domains(j)%max_U(i, j1, k) = swapper
+                    end do
+                end do
+            end do
+        end do
+
+        ! At this point all the domain%U values should be unchanged, while domain%max_U
+        ! should be consistent between domains
     end subroutine
 
     !
@@ -855,6 +1009,9 @@ module multidomain_mod
         ! there, leading to tiny numerical differences in the time.
         ! To avoid any issues, we explicitly set them to the same number
 
+        !FIXME DEBUG
+        !call md%check_for_overflow('start')
+
         ! Evolve every domain, sending the data to communicate straight after
         ! the evolve
         do j = 1, size(md%domains, kind=ip)
@@ -878,15 +1035,19 @@ module multidomain_mod
                 ! domain could support substantially different time-steps in different parts of the
                 ! "big domain". In combination with load balancing, we can get large speedups.
                 !
-                ! NOTE: This will lead to different timestepping with different numbers of cores,
-                ! so the results should depend on the number of cores.
-                if(md%domains(j)%max_dt > 0.0_dp) nt = max(1, min(nt, ceiling(dt/md%domains(j)%max_dt) ))
+                ! NOTE: This will lead to different timestepping with different domain partitions,
+                ! so the results should depend on the number of cores unless we specity the partition
+                ! via a load_balance_file.
+                if(md%domains(j)%max_dt > 0.0_dp) then
+                    nt = max(1, min(nt, ceiling(dt/(md%domains(j)%local_timestepping_scale * md%domains(j)%max_dt) )))
+                end if
             end if
 
             dt_local = dt/(1.0_dp * nt)
 
             ! Step once
             call md%domains(j)%evolve_one_step(dt_local)
+            !call md%check_for_overflow('inner', j)
 
             ! Report max_dt as the peak dt during the first timestep
             ! In practice max_dt may cycle between time-steps
@@ -895,6 +1056,7 @@ module multidomain_mod
             ! Do the remaining sub-steps
             do i = 2, nt ! Loop never runs if nt < 2
                 call md%domains(j)%evolve_one_step(dt_local)
+                !call md%check_for_overflow('innerB', j)
             end do
             md%domains(j)%max_dt = max_dt_store
 
@@ -906,6 +1068,9 @@ module multidomain_mod
             ! Ensure numerically identical time for all domains
             md%domains(j)%time = tend
         end do
+
+        !FIXME DEBUG
+        !call md%check_for_overflow('step-before-comms')
 
         if(.not. send_halos_immediately) then
             ! Do all the coarray communication in one hit
@@ -921,6 +1086,9 @@ module multidomain_mod
         ! also sync after to ensure it is not overwritten before it is used
         call md%recv_halos(sync_before=sync_before_recv, sync_after=sync_after_recv)
 
+        !FIXME DEBUG
+        !call md%check_for_overflow('step-after-comms')
+
         if(send_boundary_flux_data) then
             TIMER_START('nesting_flux_correction')
             ! Do flux correction
@@ -929,6 +1097,9 @@ module multidomain_mod
                     md%all_timestepping_methods_md, fraction_of = 1.0_dp)
             end do
             TIMER_STOP('nesting_flux_correction')
+
+            !FIXME DEBUG
+            !call md%check_for_overflow('step-after-flux_correct')
         end if
 
     end subroutine
@@ -1462,10 +1633,10 @@ module multidomain_mod
             dvol = vol_and_bfi(4) 
 #endif
             write(log_output_unit, "(A)"         ) 'Volume statistics (m^3) integrated over all domains and images:'
-            write(log_output_unit, "(A, ES20.12)") '  Multidomain volume       : ', vol
-            write(log_output_unit, "(A, ES20.12)") '              volume change: ', dvol
-            write(log_output_unit, "(A, ES20.12)") '     boundary flux integral: ', bfi
-            write(log_output_unit, "(A, ES20.12)") '         unexplained change: ', dvol + bfi
+            write(log_output_unit, "(A, ES25.12E3)") '  Multidomain volume       : ', vol
+            write(log_output_unit, "(A, ES25.12E3)") '              volume change: ', dvol
+            write(log_output_unit, "(A, ES25.12E3)") '     boundary flux integral: ', bfi
+            write(log_output_unit, "(A, ES25.12E3)") '         unexplained change: ', dvol + bfi
 
     end subroutine
 
@@ -1755,9 +1926,10 @@ module multidomain_mod
     !
     ! Convenience print routine
     !
-    subroutine print_multidomain(md, global_stats_only)
+    subroutine print_multidomain(md, global_stats_only, energy_is_finite)
         class(multidomain_type), intent(inout) :: md ! inout allows for timer to run
         logical, optional, intent(in) :: global_stats_only
+        logical, optional, intent(out) :: energy_is_finite
 
         integer(ip) :: i, j, k, ecw
         real(dp) :: minstage, maxstage, minspeed, maxspeed, stg1, speed_sq, depth_C, depth_E, depth_N
@@ -1815,26 +1987,26 @@ module multidomain_mod
             write(log_output_unit, "(A)"         ) 'Domain ID: '
             write(log_output_unit, "(A, I15)"     ) '        ', md%domains(k)%myid
             write(log_output_unit, "(A)"         ) 'Time: '
-            write(log_output_unit, "(A, ES20.12)") '        ', md%domains(k)%time
+            write(log_output_unit, "(A, ES25.12E3)") '        ', md%domains(k)%time
             write(log_output_unit, "(A)"         ) 'nsteps_advanced:'
             write(log_output_unit, "(A, I12)"    ) '        ', md%domains(k)%nsteps_advanced
             write(log_output_unit, "(A)"         ) 'max_dt in substep [ ~(cfl*dx)/(2*wave_speed) for FV solvers; 0 otherwise]:'
-            write(log_output_unit, "(A, ES20.12)") '        ', md%domains(k)%max_dt
+            write(log_output_unit, "(A, ES25.12E3)") '        ', md%domains(k)%max_dt
             write(log_output_unit, "(A)"         ) 'evolve_step_dt (one or more sub-steps): '
-            write(log_output_unit, "(A, ES20.12)") '        ', md%domains(k)%evolve_step_dt
+            write(log_output_unit, "(A, ES25.12E3)") '        ', md%domains(k)%evolve_step_dt
             write(log_output_unit, "(A)"         ) 'Stage: '
-            write(log_output_unit, "(A, ES20.12)") '        ', maxstage
-            write(log_output_unit, "(A, ES20.12)") '        ', minstage
+            write(log_output_unit, "(A, ES25.12E3)") '        ', maxstage
+            write(log_output_unit, "(A, ES25.12E3)") '        ', minstage
             write(log_output_unit, "(A)"         ) 'Speed: '
-            write(log_output_unit, "(A, ES20.12)") '        ', maxspeed
-            write(log_output_unit, "(A, ES20.12)") '        ', minspeed
+            write(log_output_unit, "(A, ES25.12E3)") '        ', maxspeed
+            write(log_output_unit, "(A, ES25.12E3)") '        ', minspeed
             write(log_output_unit, "(A)"         ) &
                 'Energy (potential) / rho [= integral of (g * depth * z + g/2 depth^2) ], zero when stage=domain%msl_linear: '
-            write(log_output_unit, "(A, ES20.12)") '        ', energy_potential_on_rho
+            write(log_output_unit, "(A, ES25.12E3)") '        ', energy_potential_on_rho
             write(log_output_unit, "(A)"         ) 'Energy (kinetic) / rho [i.e. integral of (1/2 depth * speed^2) ]: '
-            write(log_output_unit, "(A, ES20.12)") '        ', energy_kinetic_on_rho
+            write(log_output_unit, "(A, ES25.12E3)") '        ', energy_kinetic_on_rho
             write(log_output_unit, "(A)"         ) 'Energy (total) / rho: '
-            write(log_output_unit, "(A, ES20.12)") '        ', energy_total_on_rho
+            write(log_output_unit, "(A, ES25.12E3)") '        ', energy_total_on_rho
             write(log_output_unit, "(A)"         ) 'Negative_depth_clip_counter: '
             write(log_output_unit, "(A, I12)"    ) '        ', md%domains(k)%negative_depth_fix_counter
 
@@ -1843,7 +2015,7 @@ module multidomain_mod
         ! Even if reporting global stats only, we'll still want to know the time
         if(only_global_stats) then
             write(log_output_unit, "(A)"         ) 'Time: '
-            write(log_output_unit, "(A, ES20.12)") '        ', md%domains(1)%time
+            write(log_output_unit, "(A, ES25.12E3)") '        ', md%domains(1)%time
         end if
 
 #ifdef COARRAY
@@ -1859,22 +2031,30 @@ module multidomain_mod
         write(log_output_unit, "(A)"         ) ''
         write(log_output_unit, "(A)"         ) '-----------'
         write(log_output_unit, "(A)"         ) 'Global stage range (over all domains and images): '
-        write(log_output_unit, "(A, ES20.12)") '        ', global_max_stage
-        write(log_output_unit, "(A, ES20.12)") '        ', global_min_stage
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_max_stage
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_min_stage
         write(log_output_unit, "(2A)"        ) 'Global speed range (over all domains and images): '
-        write(log_output_unit, "(A, ES20.12)") '        ', global_max_speed
-        write(log_output_unit, "(A, ES20.12)") '        ', global_min_speed
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_max_speed
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_min_speed
         write(log_output_unit, "(2A)"        ) &
             'Global energy-potential / rho (over all domains and images), zero when stage=domain%msl_linear: '
-        write(log_output_unit, "(A, ES20.12)") '        ', global_energy_potential_on_rho
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_energy_potential_on_rho
         write(log_output_unit, "(2A)"        ) 'Global energy-kinetic / rho (over all domains and images): '
-        write(log_output_unit, "(A, ES20.12)") '        ', global_energy_kinetic_on_rho
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_energy_kinetic_on_rho
         write(log_output_unit, "(2A)"        ) &
             'Global energy-total / rho (over all domains and images): '
-        write(log_output_unit, "(A, ES20.12)") '        ', global_energy_total_on_rho
+        write(log_output_unit, "(A, ES25.12E3)") '        ', global_energy_total_on_rho
         write(log_output_unit, "(A)") '-----------'
         call md%report_mass_conservation_statistics()
 
+        ! Unstable models may produce NaN energy -- this is useful to detect.
+        if(present(energy_is_finite)) then
+            energy_is_finite = .true.
+            ! Check for infinity
+            if(global_energy_total_on_rho > HUGE(global_energy_total_on_rho)) energy_is_finite = .false.
+            ! Check for NA or NaN based on the "not equal to itself" property of those numbers
+            if(global_energy_total_on_rho /= global_energy_total_on_rho) energy_is_finite = .false.
+        end if
 
         TIMER_STOP('printing_stats')
 
@@ -1893,7 +2073,7 @@ module multidomain_mod
         class(multidomain_type), intent(inout) :: md
         logical, optional, intent(in) :: sync_before, sync_after
 
-        integer(ip) :: i, j, ii, jj, iL, iU, jL, jU, ip1, jp1
+        integer(ip) :: i, j, ii, jj, iL, iU, jL, jU, ip1, jp1, nbr_j, nbr_ti
         real(dp) :: elev_lim
         logical :: sync_before_local, sync_after_local
 
@@ -1938,24 +2118,51 @@ module multidomain_mod
                 !! Avoid use of type-bound-procedure in openmp region
                 !call md%domains(j)%nesting%recv_comms(i)%process_received_data(md%domains(j)%U)
                 call process_received_data(md%domains(j)%nesting%recv_comms(i), md%domains(j)%U)
+            end do
 
-                ! If a staggered-grid domain is receiving, need to avoid getting non-zero UH/VH at wet/dry
-                ! boundaries
-                if(md%domains(j)%nesting%recv_comms(i)%recv_active .and. &
-                   md%domains(j)%nesting%recv_comms(i)%use_wetdry_limiting .and. &
-                   md%domains(j)%is_staggered_grid) then
+            !$OMP DO SCHEDULE(DYNAMIC)
+            do i = 1, size(md%domains(j)%nesting%recv_comms, kind=ip)
+                !
+                ! Need some more processing of staggered-grid receive regions to deal with potential wetting/drying issues.
+                ! This cannot be included in the loop above because for some solvers, we refer to stage values outside
+                ! the receive region (extreme values of indices ip1, jp1), which could lead to a race condition. 
+                ! However one could restructure the code to put much of this content inside the loop above (truely linear solvers,
+                ! updates of non-boundary cells).
+                !
+                if( (.not. md%domains(j)%is_staggered_grid) .or. &
+                    (.not. md%domains(j)%nesting%recv_comms(i)%recv_active) &
+                  ) cycle
+                ! Below here we are definitely using a leapfrog-type solver.
 
-                    ! Indices of the region that received data
-                    iL = md%domains(j)%nesting%recv_comms(i)%recv_inds(1,1)
-                    iU = md%domains(j)%nesting%recv_comms(i)%recv_inds(2,1)
-                    jL = md%domains(j)%nesting%recv_comms(i)%recv_inds(1,2)
-                    jU = md%domains(j)%nesting%recv_comms(i)%recv_inds(2,2)
+                !! If we are receiving from a domain with the same solver type and grid size, there will never be any issues.
+                !! Actually this is not true -- counter example: suppose they differ in domain%linear_solver_is_truely_linear
+                !nbr_ti = md%domains(j)%nesting%recv_comms(i)%neighbour_domain_image_index
+                !nbr_j = md%domains(j)%nesting%recv_comms(i)%neighbour_domain_index
+                !if( md%domains(j)%nesting%recv_comms(i)%equal_cell_ratios .and. &
+                !   (md%timestepping_methods(j, ti) == md%timestepping_methods(nbr_j, nbr_ti)) &
+                !   ) cycle
 
-                    ! Elevation above which flux = 0 for linear domain
+                ! Need to avoid receiving non-zero UH/VH at wet/dry boundaries, in a way that would violate
+                ! the solver logic
+
+                ! Indices of the region that received data
+                iL = md%domains(j)%nesting%recv_comms(i)%recv_inds(1,1)
+                iU = md%domains(j)%nesting%recv_comms(i)%recv_inds(2,1)
+                jL = md%domains(j)%nesting%recv_comms(i)%recv_inds(1,2)
+                jU = md%domains(j)%nesting%recv_comms(i)%recv_inds(2,2)
+
+                ! Depending on the numerical method, we need to treat the wet/dry issues differently
+                if( any( md%domains(j)%timestepping_method == [character(len=charlen) :: &
+                        'linear', 'leapfrog_linear_plus_nonlinear_friction'] ) .and. &
+                    md%domains(j)%linear_solver_is_truely_linear) then
+                    ! Here we treat the 'truely linear' solvers where all cells 
+                    ! above (domain%msl_linear - minimum_allowed_depth)
+                    ! are dry. Flux is zero if either neighbouring elevation is dry
+
+                    ! Elevation above which flux = 0 for truely-linear domain
                     elev_lim = (md%domains(j)%msl_linear - minimum_allowed_depth)
 
-                    ! Loop over the received region, and ensure UH/VH on
-                    ! wet-dry boundaries are 0
+                    ! Loop over the received region, and ensure UH/VH on wet-dry boundaries are 0
                     do jj = jL, jU
 
                         ! jj+1, avoiding out-of-bounds
@@ -1980,17 +2187,80 @@ module multidomain_mod
                             
                         end do
                     end do
-                    
-                end if
 
-            end do
+                else if(md%domains(j)%timestepping_method /= 'leapfrog_nonlinear') then
+                    ! This treats 'not-truely-linear' staggered grid solvers, which are not fully nonlinear.
+                    ! In this case the UH/VH terms should be zero if either neighbouring cell has
+                    ! ( stage <= (elev + minimum_allowed_depth) )
+
+                    ! Loop over the received region, and ensure UH/VH on
+                    ! wet-dry boundaries are 0
+                    do jj = jL, jU
+
+                        ! jj+1, avoiding out-of-bounds
+                        jp1 = min(jj+1, size(md%domains(j)%U, 2, kind=ip))
+
+                        do ii = iL, iU
+
+                            ! ii+1, avoiding out-of-bounds
+                            ip1 = min(ii+1, size(md%domains(j)%U, 1, kind=ip))
+
+                            ! No EW flux if either neighbouring cell is dry
+                            if( (md%domains(j)%U(ii,jj,STG)  - md%domains(j)%U(ii,jj,ELV)  <= minimum_allowed_depth) .or. &
+                                (md%domains(j)%U(ip1,jj,STG) - md%domains(j)%U(ip1,jj,ELV) <= minimum_allowed_depth) ) then
+                                md%domains(j)%U(ii,jj,UH) = 0.0_dp
+                            end if
+
+                            ! No NS flux if either neighbouring cell is dry
+                            if( (md%domains(j)%U(ii,jj,STG)  - md%domains(j)%U(ii,jj,ELV)  <= minimum_allowed_depth) .or. &
+                                (md%domains(j)%U(ii,jp1,STG) - md%domains(j)%U(ii,jp1,ELV) <= minimum_allowed_depth) ) then
+                                md%domains(j)%U(ii,jj,VH) = 0.0_dp
+                            end if
+                            
+                        end do
+                    end do
+
+                else if(md%domains(j)%timestepping_method == 'leapfrog_nonlinear') then
+                    ! For the fully nonlinear staggered-grid solver, we just need to ensure there is no outflow from dry cells
+                    do jj = jL, jU
+
+                        ! jj+1, avoiding out-of-bounds
+                        jp1 = min(jj+1, size(md%domains(j)%U, 2, kind=ip))
+
+                        do ii = iL, iU
+
+                            ! ii+1, avoiding out-of-bounds
+                            ip1 = min(ii+1, size(md%domains(j)%U, 1, kind=ip))
+
+                            ! No easterly outflow from dry cell
+                            if( (md%domains(j)%U(ii,jj,STG)  - md%domains(j)%U(ii,jj,ELV)  <= minimum_allowed_depth) .and. &
+                                (md%domains(j)%U(ii,jj, UH) > 0.0_dp) ) md%domains(j)%U(ii,jj,UH) = 0.0_dp 
+                            
+                            ! No westerly outflow from dry cell -- not applicable if ii+1 extends outside eastern boundary
+                            if( (ip1 == ii + 1) .and. &
+                                (md%domains(j)%U(ip1,jj,STG) - md%domains(j)%U(ip1,jj,ELV) <= minimum_allowed_depth) .and. & 
+                                (md%domains(j)%U(ii,jj, UH) < 0.0_dp) ) md%domains(j)%U(ii,jj,UH) = 0.0_dp 
+
+                            ! No northerly outflow from dry cell
+                            if( (md%domains(j)%U(ii,jj,STG)  - md%domains(j)%U(ii,jj,ELV)  <= minimum_allowed_depth) .and. &
+                                (md%domains(j)%U(ii,jj,VH) > 0.0_dp ) ) md%domains(j)%U(ii,jj,VH) = 0.0_dp
+                           
+                            ! No southerly outflow from dry cell -- not applicable if jj+1 extends outside northern boundary
+                            if( (jp1 == jj + 1) .and. &
+                                (md%domains(j)%U(ii,jp1,STG) - md%domains(j)%U(ii,jp1,ELV) <= minimum_allowed_depth) .and. &
+                                (md%domains(j)%U(ii,jj,VH) < 0.0_dp ) ) md%domains(j)%U(ii,jj,VH) = 0.0_dp
+                            
+                        end do
+                    end do
+                end if
+            end do ! End of loop over nesting receive comms
             !$OMP END DO
             !$OMP END PARALLEL
 
 #ifdef TIMER            
             call md%domains(j)%timer%timer_end('receive_halos')
 #endif
-        end do
+        end do ! End of loop over domains
         !!$OMP END DO
         !!$OMP END PARALLEL
 
@@ -3184,6 +3454,9 @@ module multidomain_mod
 
         integer(ip) :: i
 
+        ! Make the max_U values in each domain consistent across halos
+        call md%communicate_max_U
+
         ! Print out timing info for each
         do i = 1, size(md%domains, kind=ip)
             write(log_output_unit, "(A)") ''
@@ -3289,19 +3562,25 @@ module multidomain_mod
     ! @param print_less_often optional integer (default 1) -- only print every 'nth' time we would otherwise writeout
     ! @param timing_tol real (default 0) if the time since the last write out is > "approximate_writeout_frequency - timing_tol" 
     ! , then do the write. This is an attempt to avoid round-off causing a shift in the write-out times
+    ! @param energy_is_finite optional logical variable -- if present it will be passed to the statistics printing routine. In that
+    ! case it will be .TRUE. if the global_energy_on_rho is finite, and .FALSE. otherwise. If the statistics are not printed (e.g.
+    ! print_less_often > 1) then we do not compute energy, and it will be set to .TRUE.
     subroutine write_outputs_and_print_statistics(md, &
         approximate_writeout_frequency, &
         write_grids_less_often, &
         write_gauges_less_often, &
         print_less_often,&
-        timing_tol)
+        timing_tol, &
+        energy_is_finite)
 
         class(multidomain_type), intent(inout) :: md
         real(dp), optional, intent(in) :: approximate_writeout_frequency, timing_tol
         integer(ip), optional, intent(in) :: write_grids_less_often, write_gauges_less_often, print_less_often
+        logical, optional, intent(out) :: energy_is_finite
 
         real(dp) :: approx_writeout_freq, model_time, timing_tol_local
         integer(ip) :: write_grids_n, write_gauges_n, print_n, j
+        logical :: energy_is_finite_local
 
         if(present(approximate_writeout_frequency)) then
             approx_writeout_freq = approximate_writeout_frequency
@@ -3333,6 +3612,8 @@ module multidomain_mod
             timing_tol_local = 0.0_dp
         end if
 
+        energy_is_finite_local = .TRUE.
+
         ! All the domain times should be the same
         model_time = md%domains(1)%time
 
@@ -3344,7 +3625,7 @@ module multidomain_mod
         if(model_time - approx_writeout_freq >= md%last_write_time - timing_tol_local) then
 
             ! Printing
-            if(mod(md%writeout_counter, print_n) == 0) call md%print
+            if(mod(md%writeout_counter, print_n) == 0) call md%print(energy_is_finite=energy_is_finite_local)
 
             ! Grids
             if(mod(md%writeout_counter, write_grids_n) == 0) then
@@ -3378,6 +3659,8 @@ module multidomain_mod
                     floor((model_time - md%last_write_time)/approx_writeout_freq)*approx_writeout_freq
             end if
         end if
+
+        if(present(energy_is_finite)) energy_is_finite = energy_is_finite_local
 
     end subroutine
 
